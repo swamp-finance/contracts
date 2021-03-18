@@ -1723,7 +1723,7 @@ contract StrategyPancake is Ownable, ReentrancyGuard, Pausable {
     uint256 public wantLockedTotal = 0;
     uint256 public sharesTotal = 0;
 
-    uint256 public controllerFee = 20;
+    uint256 public controllerFee = 250;
     uint256 public constant controllerFeeMax = 10000; // 100 = 1%
     uint256 public constant controllerFeeUL = 300;
 
