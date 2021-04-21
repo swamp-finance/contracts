@@ -1723,11 +1723,11 @@ contract StrategyGoose is Ownable, ReentrancyGuard, Pausable {
     uint256 public wantLockedTotal = 0;
     uint256 public sharesTotal = 0;
 
-    uint256 public controllerFee = 250;
+    uint256 public controllerFee = 200;
     uint256 public constant controllerFeeMax = 10000; // 100 = 1%
     uint256 public constant controllerFeeUL = 300;
 
-    uint256 public buyBackRate = 150;
+    uint256 public buyBackRate = 200;
     uint256 public constant buyBackRateMax = 10000; // 100 = 1%
     uint256 public constant buyBackRateUL = 800;
     /* This is vanity address -  For instance an address 0x000000000000000000000000000000000000dEaD for which it's
