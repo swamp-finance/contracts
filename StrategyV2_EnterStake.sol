@@ -34,14 +34,14 @@ interface IXswapFarm {
     // Withdraw LP tokens from MasterChef.
     function withdraw(uint256 _pid, uint256 _amount) external;
 
+    // Stake CAKE tokens to MasterChef
+    function enterStaking(uint256 _amount) external;
+
+    // Withdraw CAKE tokens from STAKING.
+    function leaveStaking(uint256 _amount) external;
+
     // Withdraw without caring about rewards. EMERGENCY ONLY.
     function emergencyWithdraw(uint256 _pid) external;
-
-    // stakedWantTokens
-    function stakedWantTokens(uint256 _pid, address _user)
-        external
-        view
-        returns (uint256);
 }
 
 interface IXRouter01 {
@@ -250,7 +250,7 @@ interface IXRouter02 is IXRouter01 {
     ) external;
 }
 
-contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
+contract StrategyV2_EnterStake is Ownable, ReentrancyGuard, Pausable {
     // Maximises yields in e.g. pancakeswap
 
     using SafeMath for uint256;
@@ -417,11 +417,6 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
             _wantAmt = _wantAmt.mul(depositFeeFactor).div(depositFeeFactorMax);
         }
 
-        // update wantLockedTotal, could deviate because of Venus loans
-        if (isAutoComp) {
-            wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
-        }
-
         uint256 sharesAdded = _wantAmt;
         if (wantLockedTotal > 0) {
             sharesAdded = _wantAmt
@@ -457,12 +452,10 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         require(isAutoComp, "!isAutoComp");
         // reinvest harvested amount
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
+        wantLockedTotal = wantLockedTotal.add(wantAmt);
         IERC20(wantAddress).safeIncreaseAllowance(farmContractAddress, wantAmt);
 
-        IXswapFarm(farmContractAddress).deposit(pid, wantAmt);
-
-        // update wantLockedTotal (should be higher because of external auto-compounding + reinvested harvested amount)
-        wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
+        IXswapFarm(farmContractAddress).enterStaking(wantAmt);
     }
 
     function withdraw(address _userAddress, uint256 _wantAmt)
@@ -473,13 +466,8 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
     {
         require(_wantAmt > 0, "_wantAmt <= 0");
 
-        // update wantLockedTotal, could deviate because of Venus loans
         if (isAutoComp) {
-            wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
-        }
-
-        if (isAutoComp) {
-            IXswapFarm(farmContractAddress).withdraw(pid, _wantAmt);
+            IXswapFarm(farmContractAddress).leaveStaking(_wantAmt); // Just for CAKE staking, we dont use withdraw()
         }
 
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
@@ -520,7 +508,7 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         require(isAutoComp, "!isAutoComp");
 
         // Harvest farm tokens
-        IXswapFarm(farmContractAddress).withdraw(pid, 0);
+        IXswapFarm(farmContractAddress).leaveStaking(0); // Just for CAKE staking, we dont use withdraw()
 
         // Converts farm tokens into want tokens
         uint256 earnedAmt = IERC20(earnedAddress).balanceOf(address(this));
