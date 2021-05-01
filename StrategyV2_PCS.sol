@@ -36,12 +36,6 @@ interface IXswapFarm {
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
     function emergencyWithdraw(uint256 _pid) external;
-
-    // stakedWantTokens
-    function stakedWantTokens(uint256 _pid, address _user)
-        external
-        view
-        returns (uint256);
 }
 
 interface IXRouter01 {
@@ -250,7 +244,7 @@ interface IXRouter02 is IXRouter01 {
     ) external;
 }
 
-contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
+contract StrategyV2_PCS is Ownable, ReentrancyGuard, Pausable {
     // Maximises yields in e.g. pancakeswap
 
     using SafeMath for uint256;
@@ -417,11 +411,6 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
             _wantAmt = _wantAmt.mul(depositFeeFactor).div(depositFeeFactorMax);
         }
 
-        // update wantLockedTotal, could deviate because of Venus loans
-        if (isAutoComp) {
-            wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
-        }
-
         uint256 sharesAdded = _wantAmt;
         if (wantLockedTotal > 0) {
             sharesAdded = _wantAmt
@@ -457,12 +446,10 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         require(isAutoComp, "!isAutoComp");
         // reinvest harvested amount
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
+        wantLockedTotal = wantLockedTotal.add(wantAmt);
         IERC20(wantAddress).safeIncreaseAllowance(farmContractAddress, wantAmt);
 
         IXswapFarm(farmContractAddress).deposit(pid, wantAmt);
-
-        // update wantLockedTotal (should be higher because of external auto-compounding + reinvested harvested amount)
-        wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
     }
 
     function withdraw(address _userAddress, uint256 _wantAmt)
@@ -472,11 +459,6 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         returns (uint256)
     {
         require(_wantAmt > 0, "_wantAmt <= 0");
-
-        // update wantLockedTotal, could deviate because of Venus loans
-        if (isAutoComp) {
-            wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
-        }
 
         if (isAutoComp) {
             IXswapFarm(farmContractAddress).withdraw(pid, _wantAmt);
