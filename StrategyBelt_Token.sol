@@ -11,38 +11,6 @@ import "./helpers/ReentrancyGuard.sol";
 import "./helpers/Pausable.sol";
 import "./helpers/Ownable.sol";
 
-interface IXswapFarm {
-    function poolLength() external view returns (uint256);
-
-    function userInfo() external view returns (uint256);
-
-    // Return reward multiplier over the given _from to _to block.
-    function getMultiplier(uint256 _from, uint256 _to)
-        external
-        view
-        returns (uint256);
-
-    // View function to see pending CAKEs on frontend.
-    // function pendingCake(uint256 _pid, address _user)
-    //     external
-    //     view
-    //     returns (uint256);
-
-    // Deposit LP tokens to the farm for farm's token allocation.
-    function deposit(uint256 _pid, uint256 _amount) external;
-
-    // Withdraw LP tokens from MasterChef.
-    function withdraw(uint256 _pid, uint256 _amount) external;
-
-    // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 _pid) external;
-
-    // stakedWantTokens
-    function stakedWantTokens(uint256 _pid, address _user)
-        external
-        view
-        returns (uint256);
-}
 
 interface IXRouter01 {
     function factory() external pure returns (address);
@@ -250,20 +218,32 @@ interface IXRouter02 is IXRouter01 {
     ) external;
 }
 
-contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
+interface IMasterBelt {
+    function poolInfo(uint256 _pid) external view returns (address, uint256, uint256, uint256, address);
+    function userInfo(uint256 _pid, address _user) external view returns (uint256, uint256);
+    function pendingBELT(uint256 _pid, address _user) external view returns (uint256);
+    function stakedWantTokens(uint256 _pid, address _user) external view returns (uint256);
+    function deposit(uint256 _pid, uint256 _wantAmt) external;
+    function withdraw(uint256 _pid, uint256 _wantAmt) external;
+    function withdrawAll(uint256 _pid) external;
+    function emergencyWithdraw(uint256 _pid) external;
+}
+
+interface IBeltMultiStrategyToken {
+    function deposit(uint256 _amount, uint256 _minShares) external;
+}
+
+
+contract StrategyBelt_Token is Ownable, ReentrancyGuard, Pausable {
     // Maximises yields in e.g. pancakeswap
 
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
-    bool public isSingleVault;
-    bool public isAutoComp;
-
     address public farmContractAddress; // address of farm, eg, PCS, Thugs etc.
     uint256 public pid; // pid of pool in farmContractAddress
-    address public wantAddress;
-    address public token0Address;
-    address public token1Address;
+    address public wantAddress;    // 4BELT, VENUS BLP, 
+    address public wantOrigAddress;
     address public earnedAddress;
     address public uniRouterAddress; // uniswap, pancakeswap etc
     address public buybackRouterAddress = 0x10ED43C718714eb63d5aA57B78B54704E256024E; // uniswap, pancakeswap etc
@@ -304,11 +284,10 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant exitFeeFactorMax = 10000;
     uint256 public constant exitFeeFactorLL = 9950; // 0.5% is the max exit fee settable. LL = lowerlimit
 
+    uint256 public slippageFactor = 950; // 5% default slippage tolerance
+    // uint256 public constant slippageFactorUL = 995;
+
     address[] public earnedToNATIVEPath;
-    address[] public earnedToToken0Path;
-    address[] public earnedToToken1Path;
-    address[] public token0ToEarnedPath;
-    address[] public token1ToEarnedPath;
     address[] public earnedToWantPath;
     address[] public earnedToWBNBPath;
     address[] public WBNBToNATIVEPath;
@@ -316,13 +295,10 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
     constructor(
         address _nativeFarmAddress,
         address _NATIVEAddress,
-        bool _isSingleVault,
-        bool _isAutoComp,
         address _farmContractAddress,
         uint256 _pid,
         address _wantAddress,
-        address _token0Address,
-        address _token1Address,
+        address _wantOrigAddress,
         address _earnedAddress,
         address _uniRouterAddress,
         address _wbnbAddress,
@@ -334,9 +310,8 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         nativeFarmAddress = _nativeFarmAddress;
         NATIVEAddress = _NATIVEAddress;
 
-        isSingleVault = _isSingleVault;
-        isAutoComp = _isAutoComp;
         wantAddress = _wantAddress;
+        wantOrigAddress = _wantOrigAddress;
         wbnbAddress = _wbnbAddress;
 
         depositFeeFactor = _depositFeeFactor;
@@ -344,51 +319,24 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         entranceFeeFactor = _entranceFeeFactor;
         exitFeeFactor = _exitFeeFactor;
 
-        if (isAutoComp) {
-            if (!isSingleVault) {
-                token0Address = _token0Address;
-                token1Address = _token1Address;
-            }
+        farmContractAddress = _farmContractAddress;
+        pid = _pid;
+        earnedAddress = _earnedAddress;
 
-            farmContractAddress = _farmContractAddress;
-            pid = _pid;
-            earnedAddress = _earnedAddress;
+        uniRouterAddress = _uniRouterAddress;
 
-            uniRouterAddress = _uniRouterAddress;
-
-            earnedToNATIVEPath = [earnedAddress, wbnbAddress, NATIVEAddress];
-            if (wbnbAddress == earnedAddress) {
-                earnedToNATIVEPath = [wbnbAddress, NATIVEAddress];
-            }
-
-            earnedToToken0Path = [earnedAddress, wbnbAddress, token0Address];
-            if (wbnbAddress == token0Address) {
-                earnedToToken0Path = [earnedAddress, wbnbAddress];
-            }
-
-            earnedToToken1Path = [earnedAddress, wbnbAddress, token1Address];
-            if (wbnbAddress == token1Address) {
-                earnedToToken1Path = [earnedAddress, wbnbAddress];
-            }
-
-            token0ToEarnedPath = [token0Address, wbnbAddress, earnedAddress];
-            if (wbnbAddress == token0Address) {
-                token0ToEarnedPath = [wbnbAddress, earnedAddress];
-            }
-
-            token1ToEarnedPath = [token1Address, wbnbAddress, earnedAddress];
-            if (wbnbAddress == token1Address) {
-                token1ToEarnedPath = [wbnbAddress, earnedAddress];
-            }
-
-            earnedToWantPath = [earnedAddress, wbnbAddress, wantAddress];
-            if (wbnbAddress == wantAddress) {
-                earnedToWantPath = [earnedAddress, wantAddress];
-            }
-
-            earnedToWBNBPath = [earnedAddress, wbnbAddress];
-            WBNBToNATIVEPath = [wbnbAddress, NATIVEAddress];
+        earnedToNATIVEPath = [earnedAddress, wbnbAddress, NATIVEAddress];
+        if (wbnbAddress == earnedAddress) {
+            earnedToNATIVEPath = [wbnbAddress, NATIVEAddress];
         }
+
+        earnedToWantPath = [earnedAddress, wbnbAddress, wantOrigAddress];
+        if (wbnbAddress == wantOrigAddress) {
+            earnedToWantPath = [earnedAddress, wantOrigAddress];
+        }
+
+        earnedToWBNBPath = [earnedAddress, wbnbAddress];
+        WBNBToNATIVEPath = [wbnbAddress, NATIVEAddress];
 
         transferOwnership(nativeFarmAddress);
     }
@@ -417,11 +365,6 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
             _wantAmt = _wantAmt.mul(depositFeeFactor).div(depositFeeFactorMax);
         }
 
-        // update wantLockedTotal, could deviate because of Venus loans
-        if (isAutoComp) {
-            wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
-        }
-
         uint256 sharesAdded = _wantAmt;
         if (wantLockedTotal > 0) {
             sharesAdded = _wantAmt
@@ -440,11 +383,7 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         }
         sharesTotal = sharesTotal.add(sharesAdded);
 
-        if (isAutoComp) {
-            _farm();
-        } else {
-            wantLockedTotal = wantLockedTotal.add(_wantAmt);
-        }
+        _farm();
 
         return sharesAdded;
     }
@@ -454,15 +393,21 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
     }
 
     function _farm() internal {
-        require(isAutoComp, "!isAutoComp");
-        // reinvest harvested amount
+        // (re)invest harvested amount
+        uint256 wantOrigBal = IERC20(wantOrigAddress).balanceOf(address(this));
+        if (wantOrigBal > 0) {
+            IERC20(wantOrigAddress).safeIncreaseAllowance(wantAddress, wantOrigBal);
+            IBeltMultiStrategyToken(wantAddress).deposit(wantOrigBal, 0);
+        }
+
+        // Invest BLP tokens
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
         IERC20(wantAddress).safeIncreaseAllowance(farmContractAddress, wantAmt);
 
-        IXswapFarm(farmContractAddress).deposit(pid, wantAmt);
+        IMasterBelt(farmContractAddress).deposit(pid, wantAmt);
 
         // update wantLockedTotal (should be higher because of external auto-compounding + reinvested harvested amount)
-        wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
+        wantLockedTotal = wantLockedTotal.add(wantAmt);
     }
 
     function withdraw(address _userAddress, uint256 _wantAmt)
@@ -473,11 +418,7 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
     {
         require(_wantAmt > 0, "_wantAmt <= 0");
 
-        // update wantLockedTotal, could deviate because of Venus loans
-        if (isAutoComp) {
-            wantLockedTotal = IXswapFarm(farmContractAddress).stakedWantTokens(pid, address(this));
-            IXswapFarm(farmContractAddress).withdraw(pid, _wantAmt);
-        }
+        IMasterBelt(farmContractAddress).withdraw(pid, _wantAmt);
 
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
         if (_wantAmt > wantAmt) {
@@ -514,10 +455,9 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
     // 3. Deposits want tokens
 
     function earn() public nonReentrant whenNotPaused {
-        require(isAutoComp, "!isAutoComp");
 
         // Harvest farm tokens
-        IXswapFarm(farmContractAddress).withdraw(pid, 0);
+        IMasterBelt(farmContractAddress).withdraw(pid, 0);
 
         // Converts farm tokens into want tokens
         uint256 earnedAmt = IERC20(earnedAddress).balanceOf(address(this));
@@ -525,84 +465,26 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         earnedAmt = distributeFees(earnedAmt);
         earnedAmt = buyBack(earnedAmt);
 
-        if (isSingleVault) {
-            if (earnedAddress != wantAddress) {
-                IERC20(earnedAddress).safeIncreaseAllowance(
-                    uniRouterAddress,
-                    earnedAmt
-                );
-
-                // Swap earned to want
-                IXRouter02(uniRouterAddress)
-                    .swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                    earnedAmt,
-                    0,
-                    earnedToWantPath,
-                    address(this),
-                    now + routerDeadlineDuration
-                );
-            }
-            lastEarnBlock = block.number;
-            _farm();
-            return;
-        }
-
-        IERC20(earnedAddress).safeIncreaseAllowance(
-            uniRouterAddress,
-            earnedAmt
-        );
-
-        if (earnedAddress != token0Address) {
-            // Swap half earned to token0
-            IXRouter02(uniRouterAddress)
-                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                earnedAmt.div(2),
-                0,
-                earnedToToken0Path,
-                address(this),
-                now + routerDeadlineDuration
-            );
-        }
-
-        if (earnedAddress != token1Address) {
-            // Swap half earned to token1
-            IXRouter02(uniRouterAddress)
-                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                earnedAmt.div(2),
-                0,
-                earnedToToken1Path,
-                address(this),
-                now + routerDeadlineDuration
-            );
-        }
-
-        // Get want tokens, ie. add liquidity
-        uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
-        uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
-        if (token0Amt > 0 && token1Amt > 0) {
-            IERC20(token0Address).safeIncreaseAllowance(
+        if (earnedAddress != wantOrigAddress) {
+            IERC20(earnedAddress).safeIncreaseAllowance(
                 uniRouterAddress,
-                token0Amt
+                earnedAmt
             );
-            IERC20(token1Address).safeIncreaseAllowance(
+
+            // Swap earned to busd
+            _safeSwap(
                 uniRouterAddress,
-                token1Amt
-            );
-            IXRouter02(uniRouterAddress).addLiquidity(
-                token0Address,
-                token1Address,
-                token0Amt,
-                token1Amt,
-                0,
-                0,
+                earnedAmt,
+                slippageFactor,
+                earnedToWantPath,
                 address(this),
                 now + routerDeadlineDuration
             );
         }
 
         lastEarnBlock = block.number;
-
         _farm();
+        return;
     }
 
     function buyBack(uint256 _earnedAmt) internal returns (uint256) {
@@ -622,10 +504,10 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
                     buyBackAmt
                 );
 
-                IXRouter02(uniRouterAddress)
-                    .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                _safeSwap(
+                    uniRouterAddress,
                     buyBackAmt,
-                    0,
+                    slippageFactor,
                     earnedToWBNBPath,
                     address(this),
                     now + routerDeadlineDuration
@@ -640,10 +522,10 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
                     wbnbAmt
                 );
 
-                IXRouter02(buybackRouterAddress)
-                    .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                _safeSwap(
+                    buybackRouterAddress,
                     wbnbAmt,
-                    0,
+                    slippageFactor,
                     WBNBToNATIVEPath,
                     buyBackAddress,
                     now + routerDeadlineDuration
@@ -657,10 +539,10 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
                 buyBackAmt
             );
 
-            IXRouter02(uniRouterAddress)
-                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            _safeSwap(
+                uniRouterAddress,
                 buyBackAmt,
-                0,
+                slippageFactor,
                 earnedToNATIVEPath,
                 buyBackAddress,
                 now + routerDeadlineDuration
@@ -684,50 +566,7 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
         return _earnedAmt;
     }
 
-    function convertDustToEarned() public whenNotPaused {
-        require(isAutoComp, "!isAutoComp");
-        require(!isSingleVault, "isSingleVault");
-
-        // Converts dust tokens into earned tokens, which will be reinvested on the next earn().
-
-        // Converts token0 dust (if any) to earned tokens
-        uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
-        if (token0Address != earnedAddress && token0Amt > 0) {
-            IERC20(token0Address).safeIncreaseAllowance(
-                uniRouterAddress,
-                token0Amt
-            );
-
-            // Swap all dust tokens to earned tokens
-            IXRouter02(uniRouterAddress)
-                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                token0Amt,
-                0,
-                token0ToEarnedPath,
-                address(this),
-                now + routerDeadlineDuration
-            );
-        }
-
-        // Converts token1 dust (if any) to earned tokens
-        uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
-        if (token1Address != earnedAddress && token1Amt > 0) {
-            IERC20(token1Address).safeIncreaseAllowance(
-                uniRouterAddress,
-                token1Amt
-            );
-
-            // Swap all dust tokens to earned tokens
-            IXRouter02(uniRouterAddress)
-                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                token1Amt,
-                0,
-                token1ToEarnedPath,
-                address(this),
-                now + routerDeadlineDuration
-            );
-        }
-    }
+    function convertDustToEarned() public whenNotPaused {}
 
     function pause() public onlyAllowGov {
         _pause();
@@ -777,6 +616,28 @@ contract StrategyV2 is Ownable, ReentrancyGuard, Pausable {
 
     function setBuybackRouterAddress(address _buybackRouterAddress) public onlyAllowGov {
         buybackRouterAddress = _buybackRouterAddress;
+    }
+
+    function _safeSwap(
+        address _uniRouterAddress,
+        uint256 _amountIn,
+        uint256 _slippageFactor,
+        address[] memory _path,
+        address _to,
+        uint256 _deadline
+    ) internal virtual {
+        uint256[] memory amounts =
+            IXRouter02(_uniRouterAddress).getAmountsOut(_amountIn, _path);
+        uint256 amountOut = amounts[amounts.length.sub(1)];
+
+        IXRouter02(_uniRouterAddress)
+            .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            _amountIn,
+            amountOut.mul(_slippageFactor).div(1000),
+            _path,
+            _to,
+            _deadline
+        );
     }
 
     function inCaseTokensGetStuck(
